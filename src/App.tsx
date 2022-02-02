@@ -1,16 +1,14 @@
 import React, { useEffect, useState } from 'react';
-import { createKeyPair, Session, wasm } from 'p2panda-js';
+import { TldrawApp, TDShape, TDBinding, Tldraw } from '@tldraw/tldraw';
+import debug from 'debug';
 
-// import { BambooLog } from '~/components/BambooLog';
-import { Chatlog } from '~/components/Chatlog';
-import { ENDPOINT, CHAT_SCHEMA } from '~/configs';
-import { Instructions } from '~/components/Instructions';
-
-import type { EntryRecord } from 'p2panda-js';
+import { usePeerToPanda } from './p2panda-react';
 
 import '~/styles.css';
 
-const session = new Session(ENDPOINT);
+const log = debug('tapir-draw');
+
+// const session = new Session(ENDPOINT);
 let syncInterval: number;
 
 type Document = {
@@ -25,107 +23,161 @@ type Document = {
   };
 };
 
-type Bookmark = Document & {
-  created: string;
+type Element = Document & {
   title: string;
   url: string;
+  created: string;
 };
 
+const TLDRAW_SCHEMA =
+  '0020c65567ae37efea293e34a9c7d13f8f2bf23dbdc3b5c7b9ab46293111c48fc78b';
+
 const App = (): JSX.Element => {
-  const [currentMessage, setCurrentMessage] = useState<string>('');
-  const [debugEntry, setDebugEntry] = useState<EntryRecord>(null);
-  const [keyPair, setKeyPair] = useState(null);
-  const [entries, setEntries] = useState<Bookmark[]>([]);
-  const [isSyncToggled, setSyncToggled] = useState<boolean>(true);
-  const [error, setError] = useState<string | null>(null);
+  const [app, setApp] = useState<TldrawApp>();
+  const session = usePeerToPanda();
+  const [elements, setElements] = useState([]);
+
+  const onMount = (app: TldrawApp) => {
+    app.loadRoom('test-9');
+    app.pause();
+    setApp(app);
+  };
+
+  // Publish TLDraw state on change
+
+  const handleChangePage = (
+    app: TldrawApp,
+    shapes: Record<string, TDShape | undefined>,
+    bindings: Record<string, TDBinding | undefined>,
+  ) => {
+    session.setSchema(TLDRAW_SCHEMA);
+    const asyncHandler = async () => {
+      //  New handlers? Do't really need them but why not. They have error handling!
+      const update = async (id, prev_ops, document) => {
+        try {
+          await session.update(id, prev_ops, document);
+        } catch (err) {
+          log('Error updating', { id, document, err });
+        }
+      };
+
+      const create = async (document) => {
+        try {
+          await session.create(document);
+        } catch (err) {
+          log('Error creating', { document });
+        }
+      };
+
+      const deleteDocument = async (document, prev_ops) => {
+        try {
+          await session.delete(document, prev_ops);
+        } catch (err) {
+          log('Error deleting', { document });
+        }
+      };
+
+      // Iterate over TLDraw's little world and sending all updates to p2panda.
+      // This happens whenever there is a change in the document.
+      Object.entries(shapes).forEach(async ([id, shape]) => {
+        // Superhacky: title, url, created don't really make sense. This is
+        // using a database hardcoded into aqudoggo which is supposed to be
+        // for bookmarks ... well - it works!
+        const shapeDocument = {
+          title: JSON.stringify(shape),
+          url: 'shape',
+          created: id,
+        };
+
+        // Look up whether we have retrieved this element from the server before
+        // then we can only do updates on it and not create
+        const publishedElem = elements.find(({ created }) => created === id);
+        if (publishedElem) {
+          // The `title` field contains the serialised element. If there's
+          // nothing there it means that has been deleted.
+          if (shapeDocument.title == null) {
+            await deleteDocument(publishedElem._meta.id, [
+              publishedElem._meta.last_operation,
+            ]);
+          } else {
+            await update(publishedElem._meta.id, shapeDocument, [
+              publishedElem._meta.last_operation,
+            ]);
+          }
+        } else {
+          await create(shapeDocument);
+        }
+      });
+
+      Object.entries(bindings).forEach(async ([id, binding]) => {
+        const bindingDocument = {
+          title: JSON.stringify(binding),
+          url: 'binding',
+          created: binding.id,
+        };
+
+        const publishedElem = elements.find(({ created }) => created === id);
+        if (publishedElem) {
+          await update(id, bindingDocument, [
+            publishedElem._meta.last_operation,
+          ]);
+        } else {
+          await create(bindingDocument);
+        }
+      });
+    };
+    asyncHandler();
+  };
+
+  // Load from p2panda
 
   const syncEntries = async () => {
-    setError(null);
+    clearInterval(syncInterval);
+    const elements = await session.query({ schema: TLDRAW_SCHEMA });
 
-    let unsortedEntries: Bookmark[] = [];
-    try {
-      unsortedEntries = await session.query({ schema: CHAT_SCHEMA });
-    } catch (err) {
-      setError(err.message);
-      setSyncToggled(false);
-      console.log('Error fetching entries', err);
-    }
-
-    setEntries(
-      unsortedEntries.sort(({ created: createdA }, { created: createdB }) => {
-        return new Date(createdA) > new Date(createdB) ? 1 : -1;
-      }),
-    );
-  };
-
-  // Load incoming messages frequently when sync checkbox is toggled
-  useEffect(() => {
-    if (isSyncToggled) {
-      syncEntries();
-      syncInterval = window.setInterval(syncEntries, 5000);
-    } else {
-      clearInterval(syncInterval);
-    }
-    return () => clearInterval(syncInterval);
-  }, [isSyncToggled]);
-
-  useEffect(() => {
-    // Generate or load key pair on initial page load
-    const asyncEffect = async () => {
-      let privateKey = window.localStorage.getItem('privateKey');
-      if (!privateKey) {
-        const keyPair = await createKeyPair();
-        privateKey = keyPair.privateKey();
-        window.localStorage.setItem('privateKey', privateKey);
-      }
-      const { KeyPair } = await wasm;
-      setKeyPair(KeyPair.fromPrivateKey(privateKey));
+    // This parser transfers the data format from p2panda into what's expected
+    // by TLDraw
+    const parser = (elem: Element) => {
+      const id = elem.created;
+      const shape = JSON.parse(elem.title);
+      return [id, shape];
     };
-    asyncEffect();
-  }, []);
 
-  // Publish entries and refresh chat log to get the new message in the log
-  const handlePublish = async (message: string) => {
-    const [url, ...titleSegments] = message.split(' ');
-    const title = titleSegments.join(' ');
-    await session.create(
-      {
-        url: url,
-        title: title,
-        created: new Date().toISOString(),
-      },
-      { schema: CHAT_SCHEMA, session, keyPair },
+    const shapes = elements.filter((elem) => elem.url === 'shape').map(parser);
+
+    const bindings = elements
+      .filter((elem) => elem.url === 'binding')
+      .map(JSON.parse)
+      .map(parser);
+
+    // Is this .. sound? TLDraw's multiplayer demo does it like this, but I would much
+    // rather update elements by id instead of erasing the whole page
+    app.replacePageContent(
+      Object.fromEntries(shapes),
+      Object.fromEntries(bindings),
+      {},
     );
-    syncEntries();
+    setElements(elements);
+    syncInterval = window.setInterval(syncEntries, 2000);
   };
 
-  // Filter my personal entries
-  // const myEntries = entries.filter(({ _meta: { author } }) => {
-  //   return author === keyPair.publicKey();
-  // });
+  useEffect(() => {
+    if (!session) return;
+    if (!app) return;
+    log('Start sync');
+    clearInterval(syncInterval);
+    syncEntries();
+    return () => clearInterval(syncInterval);
+  }, [session, app]);
 
   return (
-    <div className="home-wrapper flex-row">
-      <div className="left-panel-wrapper flex-column">
-        <Instructions
-          currentMessage={currentMessage}
-          debugEntry={debugEntry}
-          entries={entries}
-          keyPair={keyPair}
-          session={session}
-        />
-      </div>
-      <div className="right-panel-wrapper flex-column">
-        <Chatlog
-          handlePublish={handlePublish}
-          log={entries}
-          setCurrentMessage={setCurrentMessage}
-          setDebugEntry={setDebugEntry}
-          isSyncToggled={isSyncToggled}
-          toggleSync={() => setSyncToggled(!isSyncToggled)}
-          error={error}
-        />
-      </div>
+    <div className="tldraw">
+      <Tldraw
+        showPages={false}
+        onChangePage={handleChangePage}
+        onMount={onMount}
+        disableAssets={true}
+      />
     </div>
   );
 };
