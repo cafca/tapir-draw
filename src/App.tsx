@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { TldrawApp, TDShape, TDBinding, Tldraw } from '@tldraw/tldraw';
 import debug from 'debug';
+import { ApolloProvider, useQuery, gql } from '@apollo/client';
 
 import { usePeerToPanda } from './p2panda-react';
 
@@ -11,19 +12,34 @@ const log = debug('tapir-draw');
 // const session = new Session(ENDPOINT);
 let syncInterval: number;
 
-type Document = {
-  _meta: {
-    author: string;
-    deleted: boolean;
-    edited: boolean;
-    entries: string[];
-    id: string;
-    last_operation: string;
-    schema: string;
-  };
-};
+// type Document = {
+//   _meta: {
+//     author: string;
+//     deleted: boolean;
+//     edited: boolean;
+//     entries: string[];
+//     id: string;
+//     last_operation: string;
+//     schema: string;
+//   };
+// };
 
-type Element = Document & {
+// type Element = Document & {
+//   title: string;
+//   url: string;
+//   created: string;
+// };
+
+interface BookmarkData {
+  bookmarks: [
+    {
+      document: string;
+      fields: Element;
+    },
+  ];
+}
+
+type Element = {
   title: string;
   url: string;
   created: string;
@@ -32,10 +48,25 @@ type Element = Document & {
 const TLDRAW_SCHEMA =
   '0020c65567ae37efea293e34a9c7d13f8f2bf23dbdc3b5c7b9ab46293111c48fc78b';
 
+const GET_BOOKMARKS = gql`
+  {
+    bookmarks {
+      document
+      fields {
+        created
+        url
+        title
+      }
+    }
+  }
+`;
+
 const App = (): JSX.Element => {
   const [app, setApp] = useState<TldrawApp>();
   const session = usePeerToPanda();
-  const [elements, setElements] = useState([]);
+  const [elements, setElements] = useState(null);
+
+  const { loading, data } = useQuery<BookmarkData>(GET_BOOKMARKS);
 
   const onMount = (app: TldrawApp) => {
     app.loadRoom('test-9');
@@ -45,7 +76,7 @@ const App = (): JSX.Element => {
 
   // Publish TLDraw state on change
 
-  const handleChangePage = (
+  const handleTLDrawChange = (
     app: TldrawApp,
     shapes: Record<string, TDShape | undefined>,
     bindings: Record<string, TDBinding | undefined>,
@@ -91,16 +122,18 @@ const App = (): JSX.Element => {
 
         // Look up whether we have retrieved this element from the server before
         // then we can only do updates on it and not create
-        const publishedElem = elements.find(({ created }) => created === id);
+        const publishedElem = data.bookmarks.find(
+          ({ document, fields: { created } }) => created === id,
+        );
         if (publishedElem) {
           // The `title` field contains the serialised element. If there's
           // nothing there it means that has been deleted.
           if (shapeDocument.title == null) {
-            await deleteDocument(publishedElem._meta.id, [
+            await deleteDocument(document, [
               publishedElem._meta.last_operation,
             ]);
           } else {
-            await update(publishedElem._meta.id, shapeDocument, [
+            await update(document, shapeDocument, [
               publishedElem._meta.last_operation,
             ]);
           }
@@ -131,50 +164,43 @@ const App = (): JSX.Element => {
 
   // Load from p2panda
 
-  const syncEntries = async () => {
-    clearInterval(syncInterval);
-    const elements = await session.query({ schema: TLDRAW_SCHEMA });
-
-    // This parser transfers the data format from p2panda into what's expected
-    // by TLDraw
-    const parser = (elem: Element) => {
-      const id = elem.created;
-      const shape = JSON.parse(elem.title);
-      return [id, shape];
-    };
-
-    const shapes = elements.filter((elem) => elem.url === 'shape').map(parser);
-
-    const bindings = elements
-      .filter((elem) => elem.url === 'binding')
-      .map(JSON.parse)
-      .map(parser);
-
-    // Is this .. sound? TLDraw's multiplayer demo does it like this, but I would much
-    // rather update elements by id instead of erasing the whole page
-    app.replacePageContent(
-      Object.fromEntries(shapes),
-      Object.fromEntries(bindings),
-      {},
-    );
-    setElements(elements);
-    syncInterval = window.setInterval(syncEntries, 2000);
-  };
-
   useEffect(() => {
-    if (!session) return;
-    if (!app) return;
-    log('Start sync');
-    clearInterval(syncInterval);
+    if (!data) return;
+
+    const syncEntries = async () => {
+      // This parser transfers the data format from p2panda into what's expected
+      // by TLDraw
+      const parser = ({ fields: elem }: { fields: Element }) => {
+        const id = elem.created;
+        const shape = JSON.parse(elem.title);
+        return [id, shape];
+      };
+
+      const shapes = data.bookmarks
+        .filter((elem) => elem.fields.url === 'shape')
+        .map(parser);
+
+      const bindings = data.bookmarks
+        .filter((elem) => elem.fields.url === 'binding')
+        .map(parser);
+
+      // Is this .. sound? TLDraw's multiplayer demo does it like this, but I would much
+      // rather update elements by id instead of erasing the whole page
+      app.replacePageContent(
+        Object.fromEntries(shapes),
+        Object.fromEntries(bindings),
+        {},
+      );
+      setElements(elements);
+    };
     syncEntries();
-    return () => clearInterval(syncInterval);
-  }, [session, app]);
+  }, [data]);
 
   return (
     <div className="tldraw">
       <Tldraw
         showPages={false}
-        onChangePage={handleChangePage}
+        onChangePage={handleTLDrawChange}
         onMount={onMount}
         disableAssets={true}
       />

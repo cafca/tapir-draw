@@ -44,7 +44,7 @@ module.exports = (env, argv) => {
         {
           test: /\.css$/,
           use: ['style-loader', 'css-loader'],
-        }
+        },
       ],
     },
     plugins: [
@@ -57,7 +57,7 @@ module.exports = (env, argv) => {
       }),
       new CopyPlugin({
         patterns: [
-          { from: 'node_modules/p2panda-js/lib/*.wasm', to: '[name][ext]'},
+          { from: 'node_modules/p2panda-js/lib/*.wasm', to: '[name][ext]' },
         ],
       }),
     ],
@@ -69,6 +69,10 @@ module.exports = (env, argv) => {
       port: 4000,
       client: {
         logging: 'error',
+        overlay: {
+          errors: true,
+          warnings: false,
+        },
       },
     },
   };
