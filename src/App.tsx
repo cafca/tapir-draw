@@ -5,6 +5,8 @@ import { ApolloProvider, useQuery, gql } from '@apollo/client';
 
 import { usePeerToPanda } from './p2panda-react';
 
+import type { Session } from 'p2panda-js';
+
 import '~/styles.css';
 
 const log = debug('tapir-draw');
@@ -34,6 +36,7 @@ interface BookmarkData {
   bookmarks: [
     {
       document: string;
+      previousOperations: string;
       fields: Element;
     },
   ];
@@ -52,6 +55,7 @@ const GET_BOOKMARKS = gql`
   {
     bookmarks {
       document
+      previousOperations
       fields {
         created
         url
@@ -63,10 +67,12 @@ const GET_BOOKMARKS = gql`
 
 const App = (): JSX.Element => {
   const [app, setApp] = useState<TldrawApp>();
-  const session = usePeerToPanda();
+  const session: Session = usePeerToPanda();
   const [elements, setElements] = useState(null);
 
-  const { loading, data } = useQuery<BookmarkData>(GET_BOOKMARKS);
+  const { data } = useQuery<BookmarkData>(GET_BOOKMARKS, {
+    pollInterval: 5000,
+  });
 
   const onMount = (app: TldrawApp) => {
     app.loadRoom('test-9');
@@ -114,7 +120,7 @@ const App = (): JSX.Element => {
         // Superhacky: title, url, created don't really make sense. This is
         // using a database hardcoded into aqudoggo which is supposed to be
         // for bookmarks ... well - it works!
-        const shapeDocument = {
+        const shapeFields = {
           title: JSON.stringify(shape),
           url: 'shape',
           created: id,
@@ -123,27 +129,29 @@ const App = (): JSX.Element => {
         // Look up whether we have retrieved this element from the server before
         // then we can only do updates on it and not create
         const publishedElem = data.bookmarks.find(
-          ({ document, fields: { created } }) => created === id,
+          ({ fields: { created } }) => created === id,
         );
         if (publishedElem) {
+          const previousOperations =
+            publishedElem.previousOperations?.split(',');
           // The `title` field contains the serialised element. If there's
           // nothing there it means that has been deleted.
-          if (shapeDocument.title == null) {
-            await deleteDocument(document, [
-              publishedElem._meta.last_operation,
-            ]);
+          if (shapeFields.title == null) {
+            await deleteDocument(publishedElem.document, previousOperations);
           } else {
-            await update(document, shapeDocument, [
-              publishedElem._meta.last_operation,
-            ]);
+            await update(
+              publishedElem.document,
+              shapeFields,
+              previousOperations,
+            );
           }
         } else {
-          await create(shapeDocument);
+          await create(shapeFields);
         }
       });
 
       Object.entries(bindings).forEach(async ([id, binding]) => {
-        const bindingDocument = {
+        const bindingsFields = {
           title: JSON.stringify(binding),
           url: 'binding',
           created: binding.id,
@@ -151,11 +159,20 @@ const App = (): JSX.Element => {
 
         const publishedElem = elements.find(({ created }) => created === id);
         if (publishedElem) {
-          await update(id, bindingDocument, [
-            publishedElem._meta.last_operation,
-          ]);
+          const previousOperations =
+            publishedElem.previousOperations?.split(',');
+
+          if (bindingsFields.title == null) {
+            await deleteDocument(publishedElem.document, previousOperations);
+          } else {
+            await update(
+              publishedElem.document,
+              bindingsFields,
+              previousOperations,
+            );
+          }
         } else {
-          await create(bindingDocument);
+          await create(bindingsFields);
         }
       });
     };
